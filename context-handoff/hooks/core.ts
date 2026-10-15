@@ -46,13 +46,13 @@ export function parseAt(text: string): Threshold | undefined {
 export const urgentLine = (compactAt: number) => Math.round(compactAt * 0.95)
 
 /**
- * The fill of the first offer. 'auto' is 200K tokens or 85% of the auto-compact
+ * The fill of the first offer. 'auto' is 500K tokens or 85% of the auto-compact
  * point, whichever comes first; nothing is ever later than the urgent line.
  */
 export function offerLine(at: string, compactAt: number): number {
   const parsed = at === 'auto' ? undefined : parseAt(at)
   const line = parsed === undefined
-    ? Math.min(200_000, Math.round(compactAt * 0.85))
+    ? Math.min(500_000, Math.round(compactAt * 0.85))
     : parsed.kind === 'percent' ? Math.round((compactAt * parsed.percent) / 100) : parsed.tokens
   return Math.min(line, urgentLine(compactAt))
 }
@@ -65,7 +65,7 @@ export function nextOffer(at: string, compactAt: number, snoozeUntil: number): n
 export function describeAt(at: string, lang: Lang): string {
   const parsed = at === 'auto' ? undefined : parseAt(at)
   if (parsed === undefined) {
-    return lang === 'he' ? 'אוטומטי: 200 אלף טוקנים, או 85% מנקודת הדחיסה האוטומטית אם היא נמוכה יותר' : 'auto: 200K tokens, or 85% of the auto-compact point if that is lower'
+    return lang === 'he' ? 'אוטומטי: 500 אלף טוקנים, או 85% מנקודת הדחיסה האוטומטית אם היא נמוכה יותר' : 'auto: 500K tokens, or 85% of the auto-compact point if that is lower'
   }
   if (parsed.kind === 'percent') return lang === 'he' ? `${parsed.percent}% מנקודת הדחיסה האוטומטית` : `${parsed.percent}% of the auto-compact point`
   return lang === 'he' ? `${tokensText(parsed.tokens, 'he')} טוקנים` : `${tokensText(parsed.tokens, 'en')} tokens`

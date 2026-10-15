@@ -86,7 +86,9 @@ type Opts = {
 function world(on: On, opts: Opts = {}) {
   const clock = mock.clock(on, { now: NOW })
   // The desktop tests stand for a person who writes Hebrew; a test that wants a fresh install says so.
-  const seed = opts.surface === 'desktop' && opts.isNewInstall !== true ? { lastLang: 'he', ...(opts.seed ?? {}) } : (opts.seed ?? {})
+  // The flow tests offer at 200K, so their small numbers stay readable; the 500K default has its own test.
+  const base = { settings: { at: '200k' }, ...(opts.surface === 'desktop' && opts.isNewInstall !== true ? { lastLang: 'he' } : {}) }
+  const seed = { ...base, ...(opts.seed ?? {}) }
   const store = new Map<string, unknown>(Object.entries(seed))
   on('store.get', async ($, e) => ok(store.get(e.key)))
   on('store.set', async ($, e) => {
@@ -258,12 +260,12 @@ function deferred<T>() {
 
 describe('core', () => {
   test('thresholds and paths', async () => {
-    expect(offerLine('auto', 967_000)).toBe(200_000)
+    expect(offerLine('auto', 967_000)).toBe(500_000)
     expect(offerLine('auto', 160_000)).toBe(136_000)
     expect(offerLine('300k', 967_000)).toBe(300_000)
     expect(offerLine('90%', 967_000)).toBe(870_300)
     expect(offerLine('2m', 967_000)).toBe(918_650)
-    expect(nextOffer('auto', 967_000, 350_000)).toBe(350_000)
+    expect(nextOffer('auto', 967_000, 650_000)).toBe(650_000)
     expect(parseAt('300K')).toEqual({ kind: 'tokens', tokens: 300_000 })
     expect(parseAt('85 %')).toEqual({ kind: 'percent', percent: 85 })
     expect(parseAt('5k')).toBeUndefined()
@@ -1270,4 +1272,13 @@ test('a saved handoff another conversation took: Switch now does not clear', asy
   await press($, w, 'handoff-switch-now')
   expect(w.commands).toEqual([])
   expect((await band($)).text).toContain('already picked up in another conversation')
+})
+
+test('by default the first offer comes at 500K on a 1M window', async ($, on) => {
+  const w = world(on, { seed: { settings: {} } })
+  await start($, w)
+  await measure($, w, 450_000)
+  expect((await band($)).buttons).toEqual([])
+  await measure($, w, 510_000)
+  expect((await band($)).buttons).toEqual(['handoff-go', 'handoff-later'])
 })

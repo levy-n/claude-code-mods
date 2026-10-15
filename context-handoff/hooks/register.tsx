@@ -2,7 +2,7 @@
 // same point in a fresh window.
 //
 // session.measure: after each main turn, compare the context's tokens with the
-//   offer line (200K, or 85% of the auto-compact point if lower; /handoff at).
+//   offer line (500K, or 85% of the auto-compact point if lower; /handoff at).
 // ui.render (AbovePrompt): the band, [Continue fresh] [Later], and the states
 //   that follow. It is the only feedback the desktop app draws (it shows no
 //   toasts or log lines), and it draws whenever the app's window is attached.
