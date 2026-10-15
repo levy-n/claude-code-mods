@@ -1,0 +1,13 @@
+{
+  "name": "context-handoff",
+  "version": "1.0.0",
+  "description": "When the context grows heavy, offers to continue from the same point in a fresh window: the model writes a full handoff to .context/HANDOFF.md, the window clears, and the new conversation picks up from it. /handoff does it on demand.",
+  "author": {
+    "name": "Nati Levy",
+    "url": "https://github.com/levy-n"
+  },
+  "homepage": "https://github.com/levy-n/claude-code-mods/tree/main/context-handoff",
+  "repository": "https://github.com/levy-n/claude-code-mods",
+  "license": "MIT",
+  "keywords": ["mods", "context", "handoff", "compact", "context-window"]
+}

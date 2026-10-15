@@ -1,0 +1,22 @@
+{
+  "name": "levy-n-mods",
+  "owner": {
+    "name": "Nati Levy",
+    "url": "https://github.com/levy-n"
+  },
+  "metadata": {
+    "description": "Claude Code mods for keeping long sessions healthy: see how full the context window is, and hand off to a fresh window before it degrades."
+  },
+  "plugins": [
+    {
+      "name": "context-handoff",
+      "source": "./context-handoff",
+      "description": "When the context grows heavy, offers to continue from the same point in a fresh window, with a full handoff written by the model."
+    },
+    {
+      "name": "token-weather",
+      "source": "./token-weather",
+      "description": "Anthropic's sample mod, unchanged: a forecast of the context window above the prompt."
+    }
+  ]
+}
