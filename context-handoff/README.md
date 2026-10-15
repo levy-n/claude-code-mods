@@ -11,6 +11,8 @@ When the context grows heavy, offers to continue from the same point in a fresh 
 3. **The switch.** The mod runs `/clear` once no turn is running. The folder, model, permissions and additional folders stay; the old conversation stays under "Resume previous session" (`claude --resume <id>` in the terminal).
 4. **The pickup.** The new conversation gets the handoff attached to its first message, and a prompt sent as you: carry on with the next step, or summarize and wait if the handoff says so.
 
+Why this instead of `/compact`: see [Why not just /compact?](../README.md#why-not-just-compact).
+
 A handoff you saved with `/handoff write` and never used is offered in the next new conversation in the same folder, for three days, and taken only once.
 
 ## Commands
@@ -38,4 +40,4 @@ From `claude plugin validate`: it reads and writes `.context/HANDOFF.md` and `.c
 
 ## Tests
 
-`claude plugin test .` runs 74 tests against the engine's test kit, on both the terminal and desktop surfaces. Verified live in the desktop app: the band, and a fork over a 650K-token session that produced a complete 24KB handoff.
+`claude plugin test .` runs 75 tests against the engine's test kit, on both the terminal and desktop surfaces. Verified live in the desktop app: the band, and a fork over a 650K-token session that produced a complete 24KB handoff.

@@ -13,6 +13,16 @@ The model has no memory. On every turn Claude Code sends it the whole conversati
 
 That pile is the context window. Opus 5.5 has a 1M-token window and auto-compacts at about 967K, but quality drops long before that: the model starts to forget early instructions, miss details and make more mistakes. token-weather shows how full it is. context-handoff gets you out of it without losing your place.
 
+## Why not just /compact?
+
+Compacting writes a summary too. The difference is when it is written, what goes into it, and where it stays.
+
+- **When.** Auto-compact fires when the window is nearly full, in the middle of whatever is running, at the point where the model is most crowded. The handoff is offered at 500K, and you pick the moment.
+- **What.** The handoff follows a fixed outline: your instructions quoted word for word, what was verified and what was only assumed, what was tried and failed and why, and the next step down to the command. What can be measured (edited files, folders, your last request) the mod collects itself instead of trusting the model's memory. The new conversation opens with a few lines on where things stand, so you see right away whether it understood.
+- **Where.** A compact summary stays inside the same conversation, and the next compaction summarizes that summary. The handoff is a file in your project: you can read it, fix it before carrying on, or come back to it next week, and the old conversation stays whole under Resume.
+
+If auto-compact runs anyway, context-handoff adds the same checklist to its instructions.
+
 ## Install
 
 ```
