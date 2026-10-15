@@ -81,11 +81,13 @@ const SESSION_WRITE_MS = 10 * 60_000
 const MAX_REFORKS = 1
 
 /** A stored handoff, with the key it lives under and the turn count when its facts were read. */
-type Keyed = Pending & { key: string; turnSeqAtFacts?: number; isInWorktree?: boolean; isFreshPickup?: boolean }
+type Keyed = Pending & { key: string; turnSeqAtFacts?: number; isInWorktree?: boolean; isFreshPickup?: boolean; isForced?: boolean }
 
 type Phase =
   | { kind: 'idle' }
-  | { kind: 'offer'; tokens: number; isUrgent: boolean }
+  | { kind: 'offer'; tokens: number; isUrgent: boolean; held?: number }
+  /** A switch waits for agents and background tasks: their results reach this window only. `entry` is a handoff already written. */
+  | { kind: 'busy'; count: number; isWaiting: boolean; entry?: Keyed }
   | { kind: 'writing'; mode: Mode }
   | { kind: 'switching'; entry: Keyed }
   | { kind: 'clear-needed'; entry: Keyed }
@@ -108,6 +110,12 @@ let lastTokens: number | undefined
 let snoozeUntil = 0
 let isUrgentShown = false
 let isWorking = false
+/** In-flight background work at the end of the last main turn (the Stop event's background_tasks). */
+let backgroundTasks = 0
+/** Agents and background tasks running, as last counted. */
+let inFlightNow = 0
+/** The re-fork was for a switch the person forced past running background work. */
+let isReforkForced = false
 /** Main turns started in this process: a handoff whose facts predate a turn is stale. */
 let turnSeq = 0
 /** The current run's token: a run acts only while it still holds the latest one. */
@@ -154,7 +162,7 @@ function shortReason(err: unknown): string {
 }
 
 function stripKey(entry: Keyed): Pending {
-  const { key: _key, turnSeqAtFacts: _seq, isInWorktree: _wt, isFreshPickup: _fp, ...rest } = entry
+  const { key: _key, turnSeqAtFacts: _seq, isInWorktree: _wt, isFreshPickup: _fp, isForced: _f, ...rest } = entry
   return rest
 }
 
@@ -212,6 +220,8 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
+    // A subagent's turn is not this conversation's: it neither holds a /clear nor outdates a handoff.
+    if (e.agentId !== undefined) return next(e)
     isWorking = true
     turnSeq += 1
     quietTimer?.cancel()
@@ -234,6 +244,17 @@ export const register: Register = on => {
       }
     }
     whenQuiet($)
+    return result
+  })
+
+  // The main loop stopped: the engine lists the background work still in flight.
+  on('classic.Stop', async ($, e, next) => {
+    const result = await next(e)
+    const tasks = (e as { background_tasks?: unknown }).background_tasks
+    if (Array.isArray(tasks)) {
+      backgroundTasks = tasks.length
+      await recount($).catch(err => $.ui.log(`context-handoff: ${shortReason(err)}`, { to: 'debug' }))
+    }
     return result
   })
 
@@ -306,6 +327,14 @@ export const register: Register = on => {
             ? he ? 'בשיחה החדשה הזאת עוד אין מה להעביר. כדי להמשיך מהסיכום שמחכה, לחץ על המשך ממנו בשורה שמעל תיבת הקלט.' : 'Nothing to hand off in this new conversation yet. To continue from the waiting handoff, press Continue from it above the prompt.'
             : he ? 'עוד אין מה להעביר: בשיחה הזאת עוד אין תשובות.' : 'Nothing to hand off yet: this conversation has no replies.' }
         }
+        if (action.mode === 'switch') {
+          const count = await inFlight($)
+          if (count > 0) {
+            phase = { kind: 'busy', count, isWaiting: false }
+            $.ui.invalidate('ui.render')
+            return { text: WORDS[lang].busyCommand(count) }
+          }
+        }
         if (isWorking) {
           pendingStart = action.mode
           return { text: he ? 'אתחיל ברגע שקלוד יסיים את התור הנוכחי.' : 'Starting as soon as Claude finishes the current turn.' }
@@ -368,13 +397,33 @@ export const register: Register = on => {
     let detail = ''
     let buttons: RenderElement[] = []
     switch (p.kind) {
-      case 'offer':
-        parts = p.isUrgent ? w.offerUrgent(p.tokens) : w.offer(p.tokens)
+      case 'offer': {
+        const held = p.held ?? 0
         color = p.isUrgent ? 'warning' : 'suggestion'
+        if (held > 0) {
+          parts = p.isUrgent ? w.offerHeldUrgent(p.tokens, held) : w.offerHeld(p.tokens, held)
+          buttons = [<Button key="handoff-later" label={w.later} onPress={() => later($)} />]
+          break
+        }
+        parts = p.isUrgent ? w.offerUrgent(p.tokens) : w.offer(p.tokens)
         buttons = [
           <Button key="handoff-go" label={w.go} variant="primary" onPress={() => void startHandoff($, 'switch')} />,
           <Button key="handoff-later" label={w.later} onPress={() => later($)} />,
         ]
+        break
+      }
+      case 'busy':
+        if (p.isWaiting) {
+          parts = w.busyWaiting(p.count)
+          buttons = [<Button key="handoff-cancel-wait" label={w.cancel} onPress={() => cancelBusy($)} />]
+        } else {
+          parts = w.busyConfirm(p.count)
+          color = 'warning'
+          buttons = [
+            <Button key="handoff-wait" label={w.waitForThem} variant="primary" onPress={() => waitForBackground($)} />,
+            <Button key="handoff-switch-anyway" label={w.switchAnyway} onPress={() => switchAnyway($)} />,
+          ]
+        }
         break
       case 'writing':
         parts = p.mode === 'switch' ? w.writing : w.writingOnly
@@ -516,7 +565,7 @@ function updateOffer(tokens: number) {
     if (!isDue) phase = { kind: 'idle' }
     else if (!phase.isUrgent && tokens >= urgent && !isUrgentShown) {
       isUrgentShown = true
-      phase = { kind: 'offer', tokens, isUrgent: true }
+      phase = { kind: 'offer', tokens, isUrgent: true, held: inFlightNow }
     } else phase = { ...phase, tokens }
     return
   }
@@ -524,7 +573,7 @@ function updateOffer(tokens: number) {
   const isUrgent = tokens >= urgent
   if (isUrgent ? isUrgentShown : tokens < nextOffer(settings.at, compactAt, snoozeUntil)) return
   if (isUrgent) isUrgentShown = true
-  phase = { kind: 'offer', tokens, isUrgent }
+  phase = { kind: 'offer', tokens, isUrgent, held: inFlightNow }
 }
 
 function later($: EngineInterface) {
@@ -564,6 +613,9 @@ async function onPersonTyped($: EngineInterface) {
   } else if (phase.kind === 'saved' || phase.kind === 'failed') {
     snoozeFromNow()
     phase = { kind: 'idle' }
+  } else if (phase.kind === 'busy') {
+    snoozeFromNow()
+    phase = phase.isWaiting ? { kind: 'notice', parts: 'cancelled' } : { kind: 'idle' }
   } else if (phase.kind === 'pickup' || phase.kind === 'notice') {
     phase = { kind: 'idle' }
   }
@@ -578,7 +630,8 @@ async function onPersonTyped($: EngineInterface) {
 
 /** After a main turn, once the session stays quiet: a queued start, or a clear waiting for idle. */
 function whenQuiet($: EngineInterface) {
-  if (pendingStart === null && !(phase.kind === 'switching' && switchEntry !== null)) return
+  const isWaitingOnBackground = phase.kind === 'busy' && phase.isWaiting
+  if (pendingStart === null && !(phase.kind === 'switching' && switchEntry !== null) && !isWaitingOnBackground) return
   quietTimer?.cancel()
   quietTimer = $.clock.after(QUIET_MS, () => {
     quietTimer = null
@@ -586,11 +639,15 @@ function whenQuiet($: EngineInterface) {
     if (pendingStart !== null && !isBusy()) {
       const mode = pendingStart
       const origin = isReforkPending ? 'refork' : 'person'
+      const force = isReforkPending && isReforkForced
       pendingStart = null
       isReforkPending = false
-      void startHandoff($, mode, origin)
+      isReforkForced = false
+      void startHandoff($, mode, origin, force)
     } else if (phase.kind === 'switching' && switchEntry !== null) {
-      issueClear($)
+      void clearWhenFree($)
+    } else if (phase.kind === 'busy' && phase.isWaiting) {
+      void switchWhenFree($)
     }
   })
 }
@@ -658,8 +715,18 @@ async function forkOnce($: EngineInterface, prompt: string): Promise<ForkOutcome
   return outcome
 }
 
-async function startHandoff($: EngineInterface, mode: Mode, origin: 'person' | 'refork' = 'person') {
+async function startHandoff($: EngineInterface, mode: Mode, origin: 'person' | 'refork' = 'person', force = false) {
   if (isBusy()) return
+  // Agents and background tasks report to this conversation: a switch now would lose their results.
+  if (mode === 'switch' && !force) {
+    const count = await inFlight($)
+    if (isBusy()) return
+    if (count > 0) {
+      phase = { kind: 'busy', count, isWaiting: false }
+      $.ui.invalidate('ui.render')
+      return
+    }
+  }
   if (origin === 'person') reforkCount = 0
   // A switch still waiting for /clear gives way to the new run.
   if (switchEntry !== null) {
@@ -730,6 +797,7 @@ async function startHandoff($: EngineInterface, mode: Mode, origin: 'person' | '
       lastTypedText: lastTypedText ?? undefined,
       turnSeqAtFacts: seqAtFacts,
       isInWorktree: facts.worktree !== undefined,
+      ...(force ? { isForced: true } : {}),
     }
     if (isAcrossClear) {
       await $.store.set(entry.key, stripKey(entry))
@@ -788,7 +856,7 @@ async function requestSwitch($: EngineInterface, entry: Keyed) {
   $.ui.invalidate('ui.render')
   await $.store.set(moving.key, stripKey(moving))
   if (isWorking) return // whenQuiet issues it after the turn
-  issueClear($)
+  await clearWhenFree($)
 }
 
 /** The handoff this switch was for is gone or taken: stop, and say so if another conversation took it. */
@@ -801,6 +869,95 @@ function standDown($: EngineInterface, entry: Keyed, cur: Pending | undefined) {
   $.ui.invalidate('ui.render')
 }
 
+// ---------------------------------------------------------------- background work
+
+/** Agents and background tasks (workflows, background commands, monitors) still running in this conversation. */
+async function inFlight($: EngineInterface): Promise<number> {
+  let agents = 0
+  try {
+    const list: readonly { status: string }[] = await $.agent.list()
+    agents = list.filter(a => a.status === 'pending' || a.status === 'running' || a.status === 'waiting').length
+  } catch {
+    agents = 0
+  }
+  inFlightNow = Math.max(agents, backgroundTasks)
+  return inFlightNow
+}
+
+/** A new count: an offer shows it, and a choice whose work is done becomes a plain offer again. */
+async function recount($: EngineInterface) {
+  const count = await inFlight($)
+  if (phase.kind === 'offer' && (phase.held ?? 0) !== count) {
+    phase = { ...phase, held: count }
+  } else if (phase.kind === 'busy' && count > 0 && count !== phase.count) {
+    phase = { ...phase, count }
+  } else if (phase.kind === 'busy' && count === 0 && !phase.isWaiting) {
+    const entry = phase.entry
+    if (entry !== undefined) await keepEntryWritten($, entry, true)
+    phase = { kind: 'offer', tokens: lastTokens ?? 0, isUrgent: false, held: 0 }
+  } else return
+  $.ui.invalidate('ui.render')
+}
+
+/** The /clear, unless background work started meanwhile: then the person chooses. */
+async function clearWhenFree($: EngineInterface) {
+  const entry = switchEntry
+  if (entry === null) return
+  if (entry.isForced !== true) {
+    const count = await inFlight($)
+    if (switchEntry !== entry) return
+    if (count > 0) {
+      switchEntry = null
+      clearWatch?.cancel()
+      clearWatch = null
+      await keepEntryWritten($, entry)
+      phase = { kind: 'busy', count, isWaiting: false, entry: { ...entry, state: 'written' } }
+      $.ui.invalidate('ui.render')
+      return
+    }
+  }
+  if (isWorking) return
+  issueClear($)
+}
+
+/** Waiting, and the session is quiet: switch once nothing runs any more. */
+async function switchWhenFree($: EngineInterface) {
+  const count = await inFlight($)
+  if (phase.kind !== 'busy' || !phase.isWaiting || isWorking) return
+  if (count > 0) {
+    phase = { ...phase, count }
+    $.ui.invalidate('ui.render')
+    return
+  }
+  phase = { kind: 'idle' }
+  await startHandoff($, 'switch')
+}
+
+function waitForBackground($: EngineInterface) {
+  if (phase.kind !== 'busy') return
+  const entry = phase.entry
+  // A handoff written before the results came in is outdated: a new one is written once they are in.
+  if (entry !== undefined) void keepEntryWritten($, entry, true)
+  phase = { kind: 'busy', count: phase.count, isWaiting: true }
+  $.ui.invalidate('ui.render')
+  if (!isWorking) whenQuiet($)
+}
+
+function switchAnyway($: EngineInterface) {
+  if (phase.kind !== 'busy') return
+  const entry = phase.entry
+  phase = { kind: 'idle' }
+  $.ui.invalidate('ui.render')
+  if (entry !== undefined) void requestSwitch($, { ...entry, isForced: true })
+  else void startHandoff($, 'switch', 'person', true)
+}
+
+function cancelBusy($: EngineInterface) {
+  snoozeFromNow()
+  phase = { kind: 'idle' }
+  $.ui.invalidate('ui.render')
+}
+
 /** Facts read before a turn that has run since: the handoff misses that turn. */
 const isStaleEntry = (entry: Keyed) => entry.turnSeqAtFacts !== undefined && entry.turnSeqAtFacts !== turnSeq
 
@@ -810,6 +967,7 @@ function issueClear($: EngineInterface) {
   if (entry === null || clearPending !== null) return
   if (isStaleEntry(entry) && reforkCount < MAX_REFORKS) {
     reforkCount += 1
+    isReforkForced = entry.isForced === true
     switchEntry = null
     phase = { kind: 'idle' }
     void keepEntryWritten($, entry, true)
@@ -895,6 +1053,9 @@ async function keepForLater($: EngineInterface, isOutdated = true) {
 }
 
 function onCleared($: EngineInterface) {
+  // The new conversation counts its own background work from its first Stop.
+  backgroundTasks = 0
+  inFlightNow = 0
   const entry = (phase.kind === 'switching' || phase.kind === 'clear-needed') ? switchEntry : null
   // A /clear of this mod's that landed after the person chose to stay: the conversation is gone anyway, so pick up, carefully.
   const withdrawn = entry === null ? withdrawnClear : null
@@ -1148,18 +1309,21 @@ async function statusText($: EngineInterface): Promise<string> {
   const next = nextOffer(settings.at, compactAt, snoozeUntil)
   const t = (n: number) => tokensText(n, lang)
   const exists = !isNetworkRoot(root) && (await $.fs.exists(path))
+  const running = await inFlight($)
   const rows = he
     ? [
         `הקשר: ${tokens === undefined ? 'עוד אין מדידה' : `${t(tokens)} טוקנים`} · דחיסה אוטומטית בערך ב-${t(compactAt)}`,
         `הצעה אוטומטית: ${settings.enabled ? describeAt(settings.at, 'he') : 'כבויה'} · כרגע ב-${t(line)}${next > line ? ` · נדחתה עד ${t(next)}` : ''}`,
         `קובץ הסיכום${exists ? '' : ' (עוד לא קיים)'}: ${isolate(path)}`,
         waiting === undefined ? 'אין סיכום שמחכה' : `סיכום אחרון: ${stateWord(waiting.state, 'he')} · ${isolate(waiting.goal)}`,
+        ...(running > 0 ? [`משימות רקע שרצות עכשיו: ${running} · אין מעבר עד שיסתיימו`] : []),
       ]
     : [
         `Context: ${tokens === undefined ? 'not measured yet' : `${t(tokens)} tokens`} · auto-compact at about ${t(compactAt)}`,
         `Automatic offer: ${settings.enabled ? describeAt(settings.at, 'en') : 'off'} (now at ${t(line)}${next > line ? `, snoozed until ${t(next)}` : ''})`,
         `Handoff file: ${path}${exists ? '' : ' (not written yet)'}`,
         waiting === undefined ? 'No handoff waiting' : `Last handoff: ${waiting.goal} · ${stateWord(waiting.state, 'en')}`,
+        ...(running > 0 ? [`Background tasks running: ${running} (no switch until they finish)`] : []),
       ]
   return rows.join('\n')
 }

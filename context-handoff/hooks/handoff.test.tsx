@@ -108,7 +108,7 @@ function world(on: On, opts: Opts = {}) {
     mtimes[norm(k)] = NOW - 86_400_000
   }
   const surfaces = opts.surface === 'none' ? [] : [opts.surface ?? 'terminal']
-  const live = { tokens: undefined as number | undefined, turns: opts.turns ?? 0, surfaces, root: opts.root ?? 'C:\\work\\proj' }
+  const live = { tokens: undefined as number | undefined, turns: opts.turns ?? 0, surfaces, root: opts.root ?? 'C:\\work\\proj', agents: [] as { id: string; status: string; description: string; type: string }[] }
   const forks: string[] = []
   const replies = [...(opts.replies ?? [GOOD])]
   const submitted: { text: string; asUser?: boolean }[] = []
@@ -138,6 +138,8 @@ function world(on: On, opts: Opts = {}) {
     return ok({ startedAt: 0, context: { tokens: live.tokens, window: 1_000_000, percent: live.tokens === undefined ? undefined : Math.round(live.tokens / 10_000), breakdown }, rateLimits: [] })
   })
   on('session.surfaces', async () => ok(live.surfaces))
+  on('agent.list', async () => ok(live.agents))
+  on('classic.Stop', async () => ({}) as never)
   on('session.turns', async () => ok(live.turns))
   on('session.id', async () => ok('sess-1234abcd-old'))
   on('session.cwd', async () => ok(live.root))
@@ -217,6 +219,14 @@ async function turnBegins($: Engine, text = 'work') {
 }
 async function turnEnds($: Engine, w: W, turnId: string, reason = 'answer') {
   await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: reason === 'aborted', turnId, reason } as never)
+  await w.clock.settle()
+}
+
+/** The main loop stops with this many agents still running (listed by the engine and by Stop's background_tasks). */
+async function stopped($: Engine, w: W, running: number) {
+  w.live.agents = Array.from({ length: running }, (_, i) => ({ id: `a${i}`, status: 'running', description: `agent ${i}`, type: 'general-purpose' }))
+  const tasks = Array.from({ length: running }, (_, i) => ({ id: `b${i}`, type: 'subagent', status: 'running', description: `agent ${i}` }))
+  await ($ as unknown as { classic: { Stop: (e: unknown) => Promise<unknown> } }).classic.Stop({ hook_event_name: 'Stop', session_id: 's', transcript_path: '', cwd: 'C:\\work\\proj', stop_hook_active: false, background_tasks: tasks })
   await w.clock.settle()
 }
 
@@ -1281,4 +1291,131 @@ test('by default the first offer comes at 500K on a 1M window', async ($, on) =>
   expect((await band($)).buttons).toEqual([])
   await measure($, w, 510_000)
   expect((await band($)).buttons).toEqual(['handoff-go', 'handoff-later'])
+})
+
+// ---------------------------------------------------------------- agents and background tasks
+
+test('while agents run, the offer says so and has no switch button; it is the usual offer once they finish', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await stopped($, w, 2)
+  await measure($, w, 230_000)
+  let b = await band($)
+  expect(b.text).toContain('2 background tasks are still running')
+  expect(b.buttons).toEqual(['handoff-later'])
+  await stopped($, w, 0)
+  b = await band($)
+  expect(b.buttons).toEqual(['handoff-go', 'handoff-later'])
+})
+
+test('near auto-compaction with an agent running: no switch, stay in this window', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await stopped($, w, 1)
+  await measure($, w, 930_000)
+  const b = await band($)
+  expect(b.text).toContain('stay in this window')
+  expect(b.buttons).toEqual(['handoff-later'])
+  expect(w.forks.length).toBe(0)
+})
+
+test('/handoff while an agent runs asks first; Wait until done switches once it finished and Claude read its result', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await measure($, w, 230_000)
+  await stopped($, w, 1)
+  const reply = await cmd($, '')
+  expect(reply.text).toContain('A background task is still running')
+  expect(w.forks.length).toBe(0)
+  let b = await band($)
+  expect(b.buttons).toEqual(['handoff-wait', 'handoff-switch-anyway'])
+  await press($, w, 'handoff-wait')
+  b = await band($)
+  expect(b.text).toContain('Waiting for the background task')
+  expect(w.forks.length).toBe(0)
+  // The agent is done; its notification starts a main turn that reads the result.
+  const t = await turnBegins($, 'a task notification')
+  await stopped($, w, 0)
+  await turnEnds($, w, t)
+  await w.clock.advance(1_500)
+  await w.clock.settle()
+  expect(w.forks.length).toBe(1)
+  expect(w.commands).toEqual(['clear'])
+})
+
+test('Wait until done keeps waiting while another agent still runs', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await measure($, w, 230_000)
+  await stopped($, w, 2)
+  await cmd($, '')
+  await press($, w, 'handoff-wait')
+  const t = await turnBegins($, 'a task notification')
+  await stopped($, w, 1)
+  await turnEnds($, w, t)
+  await w.clock.advance(1_500)
+  await w.clock.settle()
+  expect(w.forks.length).toBe(0)
+  expect((await band($)).text).toContain('Waiting for the background task')
+})
+
+test('Switch anyway switches with the agent still running', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await measure($, w, 230_000)
+  await stopped($, w, 1)
+  await cmd($, '')
+  await press($, w, 'handoff-switch-anyway')
+  expect(w.forks.length).toBe(1)
+  expect(w.commands).toEqual(['clear'])
+})
+
+test('an agent that starts while the handoff is written holds the /clear; Switch anyway uses that handoff, no second fork', async ($, on) => {
+  const gate = deferred<unknown>()
+  const w = world(on, { fork: async () => gate.promise })
+  await start($, w)
+  await measure($, w, 230_000)
+  await press($, w, 'handoff-go')
+  w.live.agents = [{ id: 'a1', status: 'running', description: 'scan', type: 'Explore' }]
+  gate.resolve(ok({ isAnswered: true, text: GOOD, usage: {} }))
+  await w.clock.settle()
+  expect(w.commands).toEqual([])
+  expect((await band($)).buttons).toEqual(['handoff-wait', 'handoff-switch-anyway'])
+  expect((w.store.get(KEY) as Pending).state).toBe('written')
+  await press($, w, 'handoff-switch-anyway')
+  expect(w.forks.length).toBe(1)
+  expect(w.commands).toEqual(['clear'])
+})
+
+test('a message typed while waiting for agents cancels the wait', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await measure($, w, 230_000)
+  await stopped($, w, 1)
+  await cmd($, '')
+  await press($, w, 'handoff-wait')
+  await typed($, 'one more thing')
+  expect((await band($)).text).toContain('cancelled')
+  expect(w.forks.length).toBe(0)
+})
+
+test("a subagent's turn does not hold /handoff as if Claude were working", async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await measure($, w, 230_000)
+  await $.turn.start({ text: 'sub task', turnId: 'sub1', agentId: 'a9' } as never)
+  const reply = await cmd($, '')
+  expect(reply.text).not.toContain('as soon as')
+  await w.clock.settle()
+  expect(w.forks.length).toBe(1)
+})
+
+test('the Hebrew band speaks of background tasks with no Latin letters', async ($, on) => {
+  const w = world(on, { surface: 'desktop' })
+  await start($, w)
+  await stopped($, w, 3)
+  await measure($, w, 230_000)
+  const b = await band($, 'desktop')
+  expect(b.text).toContain('3 משימות רקע עדיין רצות')
+  for (const t of b.texts) expect(t).not.toMatch(/[A-Za-z]/)
 })

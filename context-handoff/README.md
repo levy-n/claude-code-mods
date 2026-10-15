@@ -7,6 +7,7 @@ When the context grows heavy, offers to continue from the same point in a fresh 
 ## How it works
 
 1. **The offer.** After each turn it compares the context with a line: 500K tokens, or 85% of the auto-compact point if that is lower. A band above the prompt offers **Continue fresh** or **Later**. Later moves the line on by 150K. One last offer comes at 95% of the auto-compact point.
+   - **While agents still run.** Agents, workflows and background commands report to the conversation that started them, so a switch would lose their results, and a handoff written before they finish misses them. While any of them run, the band says so and has no switch button; the usual offer comes back once they are done and Claude has read their results. `/handoff` asks first: **Wait until done** switches by itself when they finish, **Switch anyway** goes now. Near auto-compaction it does not switch at all: compaction keeps them running.
 2. **The handoff.** On accept, the model writes the handoff through a fork of the session's own transcript: it sees everything, reuses the prompt cache and runs no tools. Sections: Goal, Constraints and Preferences, Completed, In Progress, Key Decisions, Known Issues, Next Steps, Important Files, Environment, Workspace. It is saved to `<project>/.context/HANDOFF.md`; the previous file goes to `.context/handoff-archive/`.
 3. **The switch.** The mod runs `/clear` once no turn is running. The folder, model, permissions and additional folders stay; the old conversation stays under "Resume previous session" (`claude --resume <id>` in the terminal).
 4. **The pickup.** The new conversation gets the handoff attached to its first message, and a prompt sent as you: carry on with the next step, or summarize and wait if the handoff says so.
@@ -44,4 +45,4 @@ From `claude plugin validate`: it reads and writes `.context/HANDOFF.md` and `.c
 
 ## Tests
 
-`claude plugin test .` runs 75 tests against the engine's test kit, on both the terminal and desktop surfaces. Verified live in the desktop app: the band, and a fork over a 650K-token session that produced a complete 24KB handoff.
+`claude plugin test .` runs 84 tests against the engine's test kit, on both the terminal and desktop surfaces. Verified live in the desktop app: the band, and a fork over a 650K-token session that produced a complete 24KB handoff.

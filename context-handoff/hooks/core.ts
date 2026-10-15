@@ -615,7 +615,20 @@ export type Words = {
   pickupIgnore: string
   cancelledByMessage: string[]
   takenElsewhere: string[]
+  /** The offer while agents or background tasks still run: no switch until they finish. */
+  offerHeld: (tokens: number, count: number) => string[]
+  offerHeldUrgent: (tokens: number, count: number) => string[]
+  busyConfirm: (count: number) => string[]
+  busyWaiting: (count: number) => string[]
+  busyCommand: (count: number) => string
+  waitForThem: string
+  switchAnyway: string
 }
+
+/** Agents, workflows and background commands still running, in words. */
+const runningHe = (count: number) => (Number(count) === 1 ? 'משימת רקע אחת עדיין רצה' : `${Number(count) || 0} משימות רקע עדיין רצות`)
+const runningEn = (count: number) => (Number(count) === 1 ? 'A background task is still running' : `${Number(count) || 0} background tasks are still running`)
+const themEn = (count: number) => (Number(count) === 1 ? 'it' : 'they')
 
 export const WORDS: Record<Lang, Words> = {
   he: {
@@ -645,6 +658,13 @@ export const WORDS: Record<Lang, Words> = {
     pickupIgnore: 'התעלם',
     cancelledByMessage: ['ההעברה בוטלה כי שלחת הודעה · ההצעה תחזור בהמשך'],
     takenElsewhere: ['הסיכום הזה כבר נלקח בשיחה אחרת · אפשר להמשיך כאן כרגיל'],
+    offerHeld: (tokens, count) => [`ההקשר הגיע ל-${tokensText(tokens, 'he')} טוקנים · ${runningHe(count)}, אציע לעבור לחלון נקי כשהן יסתיימו`],
+    offerHeldUrgent: (tokens, count) => [`ההקשר כמעט מלא (${tokensText(tokens, 'he')} טוקנים) · ${runningHe(count)}, והדחיסה האוטומטית משאירה אותן רצות, אז עדיף להישאר בחלון הזה`],
+    busyConfirm: count => [`${runningHe(count)} · התוצאות לא יגיעו לחלון חדש`],
+    busyWaiting: count => [`מחכה ש${Number(count) === 1 ? 'משימת הרקע תסתיים' : `${Number(count) || 0} משימות הרקע יסתיימו`} · אחר כך אעבור לחלון נקי`],
+    busyCommand: count => `${runningHe(count)}, והתוצאות לא יגיעו לחלון חדש. בחר בשורה שמעל תיבת הקלט: לחכות לסיום או לעבור בכל זאת.`,
+    waitForThem: 'לחכות לסיום',
+    switchAnyway: 'לעבור בכל זאת',
   },
   en: {
     offer: tokens => [`Context is at ${tokensText(tokens, 'en')} tokens. Continue from this point in a fresh window?`],
@@ -673,6 +693,13 @@ export const WORDS: Record<Lang, Words> = {
     pickupIgnore: 'Ignore',
     cancelledByMessage: ['Handoff cancelled because you sent a message; it will be offered again later.'],
     takenElsewhere: ['This handoff was already picked up in another conversation; carry on here as usual.'],
+    offerHeld: (tokens, count) => [`Context is at ${tokensText(tokens, 'en')} tokens. ${runningEn(count)}; a fresh window is offered when ${themEn(count)} finish${Number(count) === 1 ? 'es' : ''}.`],
+    offerHeldUrgent: (tokens, count) => [`Context is nearly full (${tokensText(tokens, 'en')} tokens). ${runningEn(count)}, and auto-compaction keeps ${Number(count) === 1 ? 'it' : 'them'} running, so stay in this window.`],
+    busyConfirm: count => [`${runningEn(count)}. Results won't reach a fresh window.`],
+    busyWaiting: count => [`Waiting for ${Number(count) === 1 ? 'the background task' : `${Number(count) || 0} background tasks`} to finish, then switching to a fresh window.`],
+    busyCommand: count => `${runningEn(count)}, and results won't reach a fresh window. Choose above the prompt: wait until done, or switch anyway.`,
+    waitForThem: 'Wait until done',
+    switchAnyway: 'Switch anyway',
   },
 }
 

@@ -25,6 +25,8 @@ Compacting writes a summary too. The difference is when it is written, what goes
 
 If auto-compact runs anyway, context-handoff adds the same checklist to its instructions.
 
+One case where compacting is the better choice: agents or background tasks still running. They report to the conversation that started them, and compaction keeps them going, so context-handoff waits for them before it offers a switch.
+
 ## Install
 
 ```
