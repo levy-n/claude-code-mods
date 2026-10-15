@@ -76,7 +76,7 @@ After one more file, 81% full. Claude Code's own notice reads 90%, because it co
 **Requirements:**
 
 - Claude Code 2.1.287 or later, where mods load by default. The mod was built and tested on 2.1.280, and `claude plugin validate` passes on 2.1.285.
-- A terminal. `AbovePrompt` is drawn on the terminal surface only.
+- A terminal, or the desktop app's Code tab (this copy was checked there on 2.1.296; Anthropic's original says `AbovePrompt` is drawn on the terminal surface only).
 
 No environment variables or configuration.
 

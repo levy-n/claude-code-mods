@@ -21,7 +21,7 @@ Compacting writes a summary too. The difference is when it is written, what goes
 
 - **When.** Auto-compact fires when the window is nearly full, in the middle of whatever is running, at the point where the model is most crowded. The handoff is offered at 500K, and you pick the moment.
 - **What.** The handoff follows a fixed outline: your instructions quoted word for word, what was verified and what was only assumed, what was tried and failed and why, and the next step down to the command. What can be measured (edited files, folders, your last request) the mod collects itself instead of trusting the model's memory. The new conversation opens with a few lines on where things stand, so you see right away whether it understood.
-- **Where.** A compact summary stays inside the same conversation, and the next compaction summarizes that summary. The handoff is a file in your project: you can read it, fix it before carrying on, or come back to it next week, and the old conversation stays whole under Resume.
+- **Where.** A compact summary stays inside the same conversation, and the next compaction summarizes that summary. The handoff is a file in your project: you can read it, edit it, or come back to it next week (`/handoff write` saves it without switching, and `/handoff resume` carries on from it), and the old conversation stays whole under Resume.
 
 If auto-compact runs anyway, context-handoff adds the same checklist to its instructions.
 
