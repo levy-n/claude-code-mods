@@ -709,10 +709,11 @@ test('a conversation that already has turns is not offered a waiting handoff', a
   expect((await band($)).buttons).toEqual([])
 })
 
-test('a new process right after the mod\'s own /clear carries on by itself', async ($, on) => {
+test('a new process right after the mod\'s own /clear offers the handoff; one click carries straight on', async ($, on) => {
   const w = world(on, { seed: { [KEY]: waiting({ state: 'switching', switchingAt: NOW - 40_000, clearIssuedAt: NOW - 30_000 }) } })
   await start($, w)
-  expect(w.modSubmits().length).toBe(1)
+  expect(w.modSubmits().length).toBe(0)
+  await press($, w, 'handoff-pickup')
   expect(w.modSubmits()[0]?.text).toContain('carry straight on')
 })
 
@@ -1111,9 +1112,10 @@ test('Have Claude write it: nothing after 10 minutes ends in the failed band', a
 
 // ---------------------------------------------------------------- the second review, the desktop hunter
 
-test('a new process right after the mod\'s /clear does not wait for a turn inside session.start', async ($, on) => {
+test('session.start never waits on a turn: a new process with a waiting handoff starts at once', async ($, on) => {
   const w = world(on, { isSubmitHeldUntilStart: true, seed: { [KEY]: waiting({ state: 'switching', switchingAt: NOW - 40_000, clearIssuedAt: NOW - 30_000 }) } })
   await start($, w)
+  await press($, w, 'handoff-pickup')
   await w.clock.settle()
   expect(w.modSubmits().length).toBe(1)
 })
@@ -1145,6 +1147,7 @@ test('Try clearing again: a second /clear that hangs still turns into the hint a
   await start($, w)
   await measure($, w, 230_000)
   await press($, w, 'handoff-go')
+  await w.clock.advance(16_000)
   await press($, w, 'handoff-retry-clear')
   expect((await band($)).text).toContain('Clearing')
   await w.clock.advance(15_000)
@@ -1241,4 +1244,30 @@ test('a fresh install speaks English in the desktop app until the person writes 
   expect(w.store.get('lastLang')).toBe('he')
   await typed($, 'npm ERR! code ERESOLVE could not resolve dependency tree')
   expect((await band($, 'desktop')).text).toContain('אפשר להמשיך מאותה נקודה')
+})
+
+test('another conversation took the handoff while the /clear was refused: Try again stands down instead of clearing', async ($, on) => {
+  const w = world(on, { commandRun: async () => ({}) })
+  await start($, w)
+  await measure($, w, 230_000)
+  await press($, w, 'handoff-go')
+  const stored = w.store.get(KEY) as Pending
+  w.store.set(KEY, { ...stored, state: 'consumed', consumedBy: 'another' })
+  await press($, w, 'handoff-retry-clear')
+  expect(w.commands).toEqual(['clear'])
+  expect((await band($)).text).toContain('already picked up in another conversation')
+  expect((w.store.get(KEY) as Pending).state).toBe('consumed')
+})
+
+test('a saved handoff another conversation took: Switch now does not clear', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await measure($, w, 120_000)
+  await cmd($, 'write')
+  await w.clock.settle()
+  const stored = w.store.get(KEY) as Pending
+  w.store.set(KEY, { ...stored, state: 'consumed', consumedBy: 'another' })
+  await press($, w, 'handoff-switch-now')
+  expect(w.commands).toEqual([])
+  expect((await band($)).text).toContain('already picked up in another conversation')
 })

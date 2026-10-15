@@ -81,7 +81,7 @@ const SESSION_WRITE_MS = 10 * 60_000
 const MAX_REFORKS = 1
 
 /** A stored handoff, with the key it lives under and the turn count when its facts were read. */
-type Keyed = Pending & { key: string; turnSeqAtFacts?: number; isInWorktree?: boolean }
+type Keyed = Pending & { key: string; turnSeqAtFacts?: number; isInWorktree?: boolean; isFreshPickup?: boolean }
 
 type Phase =
   | { kind: 'idle' }
@@ -91,7 +91,7 @@ type Phase =
   | { kind: 'clear-needed'; entry: Keyed }
   | { kind: 'saved'; entry: Keyed }
   | { kind: 'failed'; code: FailCode; status?: number; mode: Mode }
-  | { kind: 'session-writing'; path: string; root: string; since: number; mode: Mode }
+  | { kind: 'session-writing'; path: string; root: string; since: number; mode: Mode; isInWorktree: boolean }
   | { kind: 'pickup'; entry: Keyed }
   | { kind: 'notice'; parts: 'cancelled' | 'taken' }
 
@@ -154,7 +154,7 @@ function shortReason(err: unknown): string {
 }
 
 function stripKey(entry: Keyed): Pending {
-  const { key: _key, turnSeqAtFacts: _seq, isInWorktree: _wt, ...rest } = entry
+  const { key: _key, turnSeqAtFacts: _seq, isInWorktree: _wt, isFreshPickup: _fp, ...rest } = entry
   return rest
 }
 
@@ -311,7 +311,7 @@ export const register: Register = on => {
           return { text: he ? 'אתחיל ברגע שקלוד יסיים את התור הנוכחי.' : 'Starting as soon as Claude finishes the current turn.' }
         }
         void startHandoff($, action.mode)
-        return { text: action.mode === 'write' ? (he ? 'כותב סיכום לקובץ, והשיחה נשארת פתוחה.' : 'Writing the handoff to .context/HANDOFF.md; this conversation stays open.') : (he ? 'כותב סיכום העברה מלא, ואז עובר לחלון נקי.' : 'Writing a full handoff, then switching to a fresh window.') }
+        return { text: action.mode === 'write' ? (he ? 'כותב סיכום לקובץ, והשיחה נשארת פתוחה.' : "Writing the handoff to the project's .context/HANDOFF.md; this conversation stays open.") : (he ? 'כותב סיכום העברה מלא, ואז עובר לחלון נקי.' : 'Writing a full handoff, then switching to a fresh window.') }
       }
       case 'resume': {
         const key = storeKey((await projectRoot($)).root)
@@ -427,7 +427,7 @@ export const register: Register = on => {
         parts = w.pickup(ageText(now - p.entry.createdAt, l), p.entry.isOutdated === true)
         detail = p.entry.goal
         buttons = [
-          <Button key="handoff-pickup" label={w.pickupGo} variant="primary" onPress={() => void resume($, p.entry, false, ['written', 'switching'])} />,
+          <Button key="handoff-pickup" label={w.pickupGo} variant="primary" onPress={() => void resume($, p.entry, p.entry.isFreshPickup === true, ['written', 'switching'])} />,
           <Button key="handoff-ignore" label={w.pickupIgnore} onPress={() => void ignoreWaiting($, p.entry)} />,
         ]
         break
@@ -482,12 +482,6 @@ async function saveSettings($: EngineInterface, patch: Partial<Settings>) {
 async function currentLang($: EngineInterface): Promise<Lang> {
   const surfaces: readonly string[] = await $.session.surfaces()
   return resolveLang(settings.language, surfaces.includes('terminal') ? 'terminal' : 'desktop', preferredLang)
-}
-
-/** Someone can answer: a surface is attached, or the host says a person attends the session (the desktop app). */
-async function isAttended($: EngineInterface): Promise<boolean> {
-  const surfaces: readonly string[] = await $.session.surfaces()
-  return surfaces.length > 0 || (await $.env.get('CLAUDE_CODE_SESSION_ATTENDED')) === '1'
 }
 
 /** The project the handoff belongs to: the main checkout when the session runs in one of its worktrees. */
@@ -781,6 +775,11 @@ async function afterWritten($: EngineInterface, entry: Keyed, mode: Mode, isStal
 
 /** Clear into the handoff: at once when idle, otherwise when the running turn is over. */
 async function requestSwitch($: EngineInterface, entry: Keyed) {
+  const stored = asPending(await $.store.get(entry.key))
+  if (stored !== undefined && stored.createdAt === entry.createdAt && (stored.state === 'consumed' || stored.state === 'dismissed')) {
+    standDown($, entry, stored)
+    return
+  }
   const switchingAt: number = await $.clock.now()
   const moving: Keyed = { ...entry, state: 'switching', switchingAt }
   ownWritten = null
@@ -790,6 +789,16 @@ async function requestSwitch($: EngineInterface, entry: Keyed) {
   await $.store.set(moving.key, stripKey(moving))
   if (isWorking) return // whenQuiet issues it after the turn
   issueClear($)
+}
+
+/** The handoff this switch was for is gone or taken: stop, and say so if another conversation took it. */
+function standDown($: EngineInterface, entry: Keyed, cur: Pending | undefined) {
+  if (clearPending === entry) clearPending = null
+  if (switchEntry === entry) switchEntry = null
+  clearWatch?.cancel()
+  clearWatch = null
+  phase = cur !== undefined && cur.createdAt === entry.createdAt && cur.state === 'consumed' ? { kind: 'notice', parts: 'taken' } : { kind: 'idle' }
+  $.ui.invalidate('ui.render')
 }
 
 /** Facts read before a turn that has run since: the handoff misses that turn. */
@@ -831,7 +840,12 @@ async function runClear($: EngineInterface, entry: Keyed) {
   if (clearPending !== null || switchEntry !== entry) return
   clearPending = entry
   const before = clearCount
-  await $.store.set(entry.key, { ...stripKey(entry), clearIssuedAt: await $.clock.now() })
+  const cur = asPending(await $.store.get(entry.key))
+  if (cur === undefined || cur.createdAt !== entry.createdAt || cur.state !== 'switching') {
+    standDown($, entry, cur)
+    return
+  }
+  await $.store.set(entry.key, { ...cur, clearIssuedAt: await $.clock.now() })
   try {
     await $.command.run({ command: 'clear' })
   } catch {
@@ -1017,11 +1031,11 @@ async function checkWaiting($: EngineInterface) {
   const entry = asPending(await $.store.get(key))
   if (entry === undefined) return
   const now: number = await $.clock.now()
-  const sinceClear = entry.clearIssuedAt === undefined ? Infinity : now - entry.clearIssuedAt
-  if (entry.state === 'switching' && sinceClear < SWITCH_TTL_MS && (await isAttended($))) {
-    await resume($, { ...entry, key }, true, ['switching'])
-  } else if ((entry.state === 'written' || (entry.state === 'switching' && now - (entry.switchingAt ?? entry.createdAt) > ABANDONED_MS)) && now - entry.createdAt < PICKUP_TTL_MS) {
-    phase = { kind: 'pickup', entry: { ...entry, key } }
+  // Just cleared into: most likely this conversation, if the app restarted on /clear; still offered, never taken unasked.
+  const isJustCleared = entry.state === 'switching' && entry.clearIssuedAt !== undefined && now - entry.clearIssuedAt < SWITCH_TTL_MS
+  const isAbandoned = entry.state === 'switching' && now - (entry.switchingAt ?? entry.createdAt) > ABANDONED_MS
+  if ((entry.state === 'written' || isJustCleared || isAbandoned) && now - entry.createdAt < PICKUP_TTL_MS) {
+    phase = { kind: 'pickup', entry: { ...entry, key, isFreshPickup: isJustCleared } }
     $.ui.invalidate('ui.render')
   }
 }
@@ -1050,7 +1064,7 @@ async function askSessionToWrite($: EngineInterface, mode: Mode) {
   if (isBusy()) return
   runSeq += 1
   const now: number = await $.clock.now()
-  const { root } = await projectRoot($)
+  const { root, worktree } = await projectRoot($)
   const path = joinPath(root, HANDOFF_REL)
   try {
     if (await $.fs.exists(path)) {
@@ -1058,7 +1072,7 @@ async function askSessionToWrite($: EngineInterface, mode: Mode) {
       if (typeof old === 'string' && old.trim() !== '') await $.fs.write(archivePath(root, now), old)
     }
     writeTurnId = null
-    phase = { kind: 'session-writing', path, root, since: now, mode }
+    phase = { kind: 'session-writing', path, root, since: now, mode, isInWorktree: worktree !== undefined }
     $.ui.invalidate('ui.render')
     writeDeadline?.cancel()
     writeDeadline = $.clock.after(SESSION_WRITE_MS, () => {
@@ -1097,7 +1111,7 @@ async function finishSessionWrite($: EngineInterface, mode: Mode) {
   if (phase.kind !== 'session-writing') return
   writeDeadline?.cancel()
   writeDeadline = null
-  const { path, root, since } = phase
+  const { path, root, since, isInWorktree } = phase
   const stat = await $.fs.stat(path).catch(() => undefined)
   if (stat === undefined || stat.mtimeMs < since - 2000) return fail($, 'not-written', mode)
   const text = await $.fs.read(path)
@@ -1116,6 +1130,7 @@ async function finishSessionWrite($: EngineInterface, mode: Mode) {
     state: mode === 'switch' ? 'switching' : 'written',
     lastTypedText: lastTypedText ?? undefined,
     turnSeqAtFacts: turnSeq,
+    isInWorktree,
   }, mode, () => run !== runSeq)
 }
 

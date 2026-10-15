@@ -38,4 +38,4 @@ From `claude plugin validate`: it reads and writes `.context/HANDOFF.md` and `.c
 
 ## Tests
 
-`claude plugin test .` runs 72 tests against the engine's test kit, on both the terminal and desktop surfaces. Verified live in the desktop app: the band, and a fork over a 650K-token session that produced a complete 24KB handoff.
+`claude plugin test .` runs 74 tests against the engine's test kit, on both the terminal and desktop surfaces. Verified live in the desktop app: the band, and a fork over a 650K-token session that produced a complete 24KB handoff.
