@@ -1,3 +1,5 @@
+> **Changed in this copy:** the original draws its line above the prompt and stops there, so any mod that runs after it in the chain cannot draw in that band. This copy draws its line and passes the band on, so other mods (such as context-handoff) show below it. Nothing else is changed. Original: [anthropics/claude-code-playground](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods/token-weather), Apache License 2.0.
+
 # Token Weather
 
 A Claude Code mod that draws a live forecast of your context window in the band above the prompt. We're sharing it as the smallest of the three mods here: one hooks module that reads real usage figures and draws one line of UI.

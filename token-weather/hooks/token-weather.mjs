@@ -1,5 +1,6 @@
 // Copyright 2026 Anthropic PBC
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026-10-15 by Nati Levy: the AbovePrompt hook passes the band on (see ui.render).
 //
 // Token Weather: a live forecast of the context window, above the prompt.
 //
@@ -46,12 +47,16 @@ export function register(on) {
     return result;
   });
 
-  on("ui.render", { component: "AbovePrompt" }, ($, e, next) => {
+  on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.hasSurvey || readings.length === 0) {
       return next(e);
     }
     const { Box, Text } = $.ui.resolve(e);
-    return band(Box, Text, e.bodyColumns ?? 80);
+    // Modified (levy-n/claude-code-mods): the band is shared, so whatever the
+    // mods after this one draw goes below the forecast instead of being dropped.
+    const below = await next(e);
+    const line = band(Box, Text, e.bodyColumns ?? 80);
+    return below ? Box({ flexDirection: "column", children: [line, below] }) : line;
   });
 }
 

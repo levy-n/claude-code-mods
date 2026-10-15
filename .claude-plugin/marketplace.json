@@ -16,7 +16,7 @@
     {
       "name": "token-weather",
       "source": "./token-weather",
-      "description": "Anthropic's sample mod, unchanged: a forecast of the context window above the prompt."
+      "description": "Anthropic's sample mod: a forecast of the context window above the prompt, patched to share that band with other mods."
     }
   ]
 }
