@@ -2,6 +2,8 @@
 
 Two [Claude Code mods](https://code.claude.com/docs/en/plugins/mods/overview) for keeping long sessions healthy.
 
+![context-handoff's offer above token-weather's forecast, over the prompt](context-handoff/screenshots/band-en.png)
+
 | Mod | What it does |
 | --- | --- |
 | [context-handoff](context-handoff/) | When the context grows heavy, offers to continue from the same point in a fresh window. The model writes a full handoff, the window clears, and the new conversation picks up from it. |
