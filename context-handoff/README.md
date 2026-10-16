@@ -6,11 +6,12 @@ When the context grows heavy, offers to continue from the same point in a fresh 
 
 ## How it works
 
-1. **The offer.** After each turn it compares the context with a line: 500K tokens, or 85% of the auto-compact point if that is lower. A band above the prompt offers **Continue fresh** or **Later**. Later moves the line on by 150K. One last offer comes at 95% of the auto-compact point.
+1. **The offer.** After each turn it compares the context with a line: 300K tokens, or 85% of the auto-compact point if that is lower. Long-context tests show the steepest drop between 256K and 1M, and an agent's session degrades faster than a single long prompt, so the line sits well before the window is full. A band above the prompt offers **Continue fresh** or **Later**. Later moves the line on by 150K. One last offer comes at 95% of the auto-compact point.
    - **While agents still run.** Agents, workflows and background commands report to the conversation that started them, so a switch would lose their results, and a handoff written before they finish misses them. While any of them run, the band says so and has no switch button; the usual offer comes back once they are done and Claude has read their results. `/handoff` asks first: **Wait until done** switches by itself when they finish, **Switch anyway** goes now. Near auto-compaction it does not switch at all: compaction keeps them running.
-2. **The handoff.** On accept, the model writes the handoff through a fork of the session's own transcript: it sees everything, reuses the prompt cache and runs no tools. Sections: Goal, Constraints and Preferences, Completed, In Progress, Key Decisions, Known Issues, Next Steps, Important Files, Environment, Workspace. It is saved to `<project>/.context/HANDOFF.md`; the previous file goes to `.context/handoff-archive/`.
+   - **Before an idle compaction.** In a terminal, Claude Code compacts a conversation left idle for about 54 minutes (`idleCompaction`, from 200K tokens). Past the offer line, the mod saves a handoff at about 47 minutes, while the prompt cache is still warm, so when you come back you can still switch to a fresh window from the full picture. Nothing is cleared without you.
+2. **The handoff.** On accept, the model writes the handoff through a fork of the session's own transcript: it sees everything, reuses the prompt cache and runs no tools. Sections: Goal, Constraints and Preferences, Completed, In Progress, Key Decisions, Known Issues, Next Steps, Important Files, Environment, Workspace. It is saved to `<project>/.context/HANDOFF.md`; the previous file goes to `.context/handoff-archive/`. Facts the mod reads itself rather than trusting the model's memory: edited files, recent shell commands (failed ones marked), agents still running, the folders, your last request, and the path of the full transcript.
 3. **The switch.** The mod runs `/clear` once no turn is running. The folder, model, permissions and additional folders stay; the old conversation stays under "Resume previous session" (`claude --resume <id>` in the terminal).
-4. **The pickup.** The new conversation gets the handoff attached to its first message, and a prompt sent as you: carry on with the next step, or summarize and wait if the handoff says so.
+4. **The pickup.** The new conversation gets the handoff attached to its first message, and a prompt sent as you: re-run one quick check from Completed, then carry on with the next step, or summarize and wait if the handoff says so. When exact wording matters, it searches the previous conversation's transcript.
 
 The start of a handoff it wrote, about the session that built this mod:
 
@@ -34,7 +35,7 @@ A handoff you saved with `/handoff write` and never used is offered in the next 
 
 ## What it touches
 
-From `claude plugin validate`: it reads and writes `.context/HANDOFF.md` and `.context/handoff-archive/` in the project, reads settings (for the additional folders), keeps a small record in its own plugin store, runs `/clear`, and sends one prompt as you after the switch. Each handoff costs one model call on your plan (two if the first answer is cut short). No network access of its own, no processes.
+From `claude plugin validate`: it reads and writes `.context/HANDOFF.md` and `.context/handoff-archive/` in the project, reads settings (the additional folders, and whether idle compaction is on), reads `DISABLE_AUTO_COMPACT` and `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`, lists the session's agents, keeps a small record in its own plugin store, runs `/clear`, and sends one prompt as you after the switch. Each handoff costs one model call on your plan (two if the first answer is cut short), including the one saved before an idle compaction. No network access of its own, no processes.
 
 ## Notes
 
@@ -45,4 +46,4 @@ From `claude plugin validate`: it reads and writes `.context/HANDOFF.md` and `.c
 
 ## Tests
 
-`claude plugin test .` runs 84 tests against the engine's test kit, on both the terminal and desktop surfaces. Verified live in the desktop app: the band, and a fork over a 650K-token session that produced a complete 24KB handoff.
+`claude plugin test .` runs 93 tests against the engine's test kit, on both the terminal and desktop surfaces. Verified live in the desktop app: the band, and a fork over a 650K-token session that produced a complete 24KB handoff.

@@ -58,7 +58,7 @@ const MESSAGES = [
   { role: 'user', text: 'תבנה את ה-mod', toolUses: [] },
   { role: 'assistant', text: 'ok', toolUses: [{ tool_use_id: 't1', tool: 'Write', input: { file_path: 'C:\\work\\proj\\hooks\\core.ts' } }, { tool_use_id: 't2', tool: 'Read', input: { file_path: 'C:\\x.md' } }] },
   { role: 'user', text: '<system-reminder>ignore</system-reminder>', toolUses: [] },
-  { role: 'assistant', text: 'ok', toolUses: [{ tool_use_id: 't3', tool: 'Edit', input: { file_path: 'C:\\work\\proj\\hooks\\register.tsx' } }] },
+  { role: 'assistant', text: 'ok', toolUses: [{ tool_use_id: 't3', tool: 'Edit', input: { file_path: 'C:\\work\\proj\\hooks\\register.tsx' } }, { tool_use_id: 't4', tool: 'Bash', input: { command: 'claude plugin test .' }, isError: true }] },
 ]
 
 type Reply = string | 'error' | 'nothing'
@@ -81,12 +81,15 @@ type Opts = {
   isSubmitHeldUntilStart?: boolean
   /** nothing in the store yet: no language learned */
   isNewInstall?: boolean
+  /** merged settings as settings.read answers them */
+  settings?: Record<string, unknown>
+  env?: Record<string, string>
 }
 
 function world(on: On, opts: Opts = {}) {
   const clock = mock.clock(on, { now: NOW })
   // The desktop tests stand for a person who writes Hebrew; a test that wants a fresh install says so.
-  // The flow tests offer at 200K, so their small numbers stay readable; the 500K default has its own test.
+  // The flow tests offer at 200K, so their small numbers stay readable; the 300K default has its own test.
   const base = { settings: { at: '200k' }, ...(opts.surface === 'desktop' && opts.isNewInstall !== true ? { lastLang: 'he' } : {}) }
   const seed = { ...base, ...(opts.seed ?? {}) }
   const store = new Map<string, unknown>(Object.entries(seed))
@@ -100,7 +103,7 @@ function world(on: On, opts: Opts = {}) {
     return VOID
   })
   on('store.keys', async () => ok([...store.keys()]))
-  mock.env(on, opts.attended === false ? {} : { CLAUDE_CODE_SESSION_ATTENDED: '1' })
+  mock.env(on, { ...(opts.attended === false ? {} : { CLAUDE_CODE_SESSION_ATTENDED: '1' }), ...(opts.env ?? {}) })
   const files: Record<string, string> = {}
   const mtimes: Record<string, number> = {}
   for (const [k, v] of Object.entries(opts.files ?? {})) {
@@ -146,7 +149,7 @@ function world(on: On, opts: Opts = {}) {
   on('session.root', async () => ok(live.root))
   on('session.repo', async () => ok(opts.repo === undefined || opts.repo === null ? null : { root: opts.repo, remote: null, internal: false, name: null }))
   on('session.messages', async () => ok(MESSAGES))
-  on('settings.read', async () => ok({ permissions: { additionalDirectories: ['G:\\Projects\\shared'] } }))
+  on('settings.read', async () => ok({ permissions: { additionalDirectories: ['G:\\Projects\\shared'] }, ...(opts.settings ?? {}) }))
   on('fs.exists', async ($, e) => ok(norm(e.path) in files))
   on('fs.read', async ($, e) => ok(files[norm(e.path)] ?? ''))
   on('fs.write', async ($, e) => {
@@ -270,7 +273,7 @@ function deferred<T>() {
 
 describe('core', () => {
   test('thresholds and paths', async () => {
-    expect(offerLine('auto', 967_000)).toBe(500_000)
+    expect(offerLine('auto', 967_000)).toBe(300_000)
     expect(offerLine('auto', 160_000)).toBe(136_000)
     expect(offerLine('300k', 967_000)).toBe(300_000)
     expect(offerLine('90%', 967_000)).toBe(870_300)
@@ -1284,12 +1287,12 @@ test('a saved handoff another conversation took: Switch now does not clear', asy
   expect((await band($)).text).toContain('already picked up in another conversation')
 })
 
-test('by default the first offer comes at 500K on a 1M window', async ($, on) => {
+test('by default the first offer comes at 300K on a 1M window', async ($, on) => {
   const w = world(on, { seed: { settings: {} } })
   await start($, w)
-  await measure($, w, 450_000)
+  await measure($, w, 290_000)
   expect((await band($)).buttons).toEqual([])
-  await measure($, w, 510_000)
+  await measure($, w, 310_000)
   expect((await band($)).buttons).toEqual(['handoff-go', 'handoff-later'])
 })
 
@@ -1418,4 +1421,97 @@ test('the Hebrew band speaks of background tasks with no Latin letters', async (
   const b = await band($, 'desktop')
   expect(b.text).toContain('3 משימות רקע עדיין רצות')
   for (const t of b.texts) expect(t).not.toMatch(/[A-Za-z]/)
+})
+
+// ---------------------------------------------------------------- idle compaction, facts, resume
+
+const IDLE = 47 * 60_000
+
+async function idleAfterTurn($: Engine, w: W, tokens: number) {
+  await measure($, w, tokens)
+  const t = await turnBegins($)
+  await turnEnds($, w, t)
+  await w.clock.advance(IDLE)
+  await w.clock.settle()
+}
+
+test('a precomputed compaction is steered too: the next compaction installs its summary', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await $.session.compact({ trigger: 'precompute', messages: [{ role: 'user', text: 'hi', toolUses: [] }] } as never)
+  expect(w.compactions[0]).toContain('[context-handoff]')
+})
+
+test('idle in the terminal past the offer line: a handoff is saved before Claude Code compacts, and nothing is cleared', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await idleAfterTurn($, w, 320_000)
+  expect(w.forks.length).toBe(1)
+  expect(w.forks[0]).toContain('checkpoint')
+  expect(w.commands).toEqual([])
+  const b = await band($)
+  expect(b.text).toContain('while you were away')
+  expect(b.buttons).toContain('handoff-switch-now')
+})
+
+test('no idle checkpoint in the desktop app, where Claude Code does not compact idle conversations', async ($, on) => {
+  const w = world(on, { surface: 'desktop' })
+  await start($, w)
+  await idleAfterTurn($, w, 320_000)
+  expect(w.forks.length).toBe(0)
+})
+
+test('no idle checkpoint with idleCompaction off in settings', async ($, on) => {
+  const w = world(on, { settings: { idleCompaction: false } })
+  await start($, w)
+  await idleAfterTurn($, w, 320_000)
+  expect(w.forks.length).toBe(0)
+})
+
+test('no idle checkpoint below the idle-compaction threshold; its env setting moves it', async ($, on) => {
+  const w = world(on, { seed: { settings: { at: '100k' } } })
+  await start($, w)
+  await idleAfterTurn($, w, 150_000)
+  expect(w.forks.length).toBe(0)
+})
+
+test('the idle-compaction threshold set in the environment counts', async ($, on) => {
+  const w = world(on, { seed: { settings: { at: '100k' } }, env: { CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS: '120000' } })
+  await start($, w)
+  await idleAfterTurn($, w, 150_000)
+  expect(w.forks.length).toBe(1)
+})
+
+test('a message before the idle point resets the wait', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await measure($, w, 320_000)
+  const t = await turnBegins($)
+  await turnEnds($, w, t)
+  await w.clock.advance(30 * 60_000)
+  await typed($, 'still here')
+  await w.clock.advance(30 * 60_000)
+  await w.clock.settle()
+  expect(w.forks.length).toBe(0)
+})
+
+test('the handoff gets the shell commands, what still runs, and the transcript path from the mod', async ($, on) => {
+  const w = world(on)
+  await start($, w)
+  await ($ as unknown as { classic: { Stop: (e: unknown) => Promise<unknown> } }).classic.Stop({ hook_event_name: 'Stop', session_id: 's', transcript_path: 'C:\\Users\\me\\.claude\\projects\\p\\s1.jsonl', cwd: 'C:\\work\\proj', stop_hook_active: false, background_tasks: [] })
+  await measure($, w, 230_000)
+  await cmd($, 'write')
+  await w.clock.settle()
+  expect(w.forks[0]).toContain('[FAILED] claude plugin test .')
+  expect(w.forks[0]).toContain('s1.jsonl')
+  expect(w.files[HANDOFF]).toContain('Full transcript of the previous conversation')
+  expect(w.files[HANDOFF]).toContain('`[FAILED] claude plugin test .`')
+})
+
+test('the resume prompt asks for one quick check first and points at the full transcript', async () => {
+  const p = { path: 'C:/p/.context/HANDOFF.md', text: '', goal: 'g', status: 'CONTINUE', createdAt: NOW, state: 'switching' } as unknown as Pending
+  for (const text of [resumePrompt(p, 'en', true), resumePrompt(p, 'he', false)]) {
+    expect(text).toMatch(/run it once|הרץ אותה פעם אחת/)
+    expect(text).toMatch(/full transcript|בתמליל המלא/)
+  }
 })

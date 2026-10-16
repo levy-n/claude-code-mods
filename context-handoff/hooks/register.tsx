@@ -2,7 +2,7 @@
 // same point in a fresh window.
 //
 // session.measure: after each main turn, compare the context's tokens with the
-//   offer line (500K, or 85% of the auto-compact point if lower; /handoff at).
+//   offer line (300K, or 85% of the auto-compact point if lower; /handoff at).
 // ui.render (AbovePrompt): the band, [Continue fresh] [Later], and the states
 //   that follow. It is the only feedback the desktop app draws (it shows no
 //   toasts or log lines), and it draws whenever the app's window is attached.
@@ -34,6 +34,7 @@ import {
   buildFile,
   describeAt,
   editedFiles,
+  recentCommands,
   failText,
   forkPrompt,
   goalLine,
@@ -77,6 +78,12 @@ const STORE_TTL_MS = 14 * 24 * 3_600_000
 const ABANDONED_MS = 10 * 60_000
 /** The fallback write gives up after this. */
 const SESSION_WRITE_MS = 10 * 60_000
+/**
+ * Claude Code compacts a terminal conversation left idle about 54 minutes (idleCompaction, from 200K
+ * tokens by default). Before that, with the prompt cache still warm, a handoff is saved.
+ */
+const IDLE_CHECKPOINT_MS = 47 * 60_000
+const IDLE_COMPACT_MIN_TOKENS = 200_000
 /** Times a switch writes the handoff again because a turn ran meanwhile, before it clears anyway. */
 const MAX_REFORKS = 1
 
@@ -91,7 +98,7 @@ type Phase =
   | { kind: 'writing'; mode: Mode }
   | { kind: 'switching'; entry: Keyed }
   | { kind: 'clear-needed'; entry: Keyed }
-  | { kind: 'saved'; entry: Keyed }
+  | { kind: 'saved'; entry: Keyed; isIdle?: boolean }
   | { kind: 'failed'; code: FailCode; status?: number; mode: Mode }
   | { kind: 'session-writing'; path: string; root: string; since: number; mode: Mode; isInWorktree: boolean }
   | { kind: 'pickup'; entry: Keyed }
@@ -114,6 +121,11 @@ let isWorking = false
 let backgroundTasks = 0
 /** Agents and background tasks running, as last counted. */
 let inFlightNow = 0
+/** What the last Stop listed as still running, in a few words each. */
+let backgroundLabels: string[] = []
+/** This conversation's transcript on disk, from the Stop event. */
+let transcriptPath: string | undefined
+let idleTimer: Timer | null = null
 /** The re-fork was for a switch the person forced past running background work. */
 let isReforkForced = false
 /** Main turns started in this process: a handoff whose facts predate a turn is stale. */
@@ -222,6 +234,7 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     // A subagent's turn is not this conversation's: it neither holds a /clear nor outdates a handoff.
     if (e.agentId !== undefined) return next(e)
+    cancelIdle()
     isWorking = true
     turnSeq += 1
     quietTimer?.cancel()
@@ -244,15 +257,23 @@ export const register: Register = on => {
       }
     }
     whenQuiet($)
+    scheduleIdle($)
     return result
   })
 
   // The main loop stopped: the engine lists the background work still in flight.
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
-    const tasks = (e as { background_tasks?: unknown }).background_tasks
+    const stop = e as { background_tasks?: unknown; transcript_path?: unknown }
+    if (typeof stop.transcript_path === 'string' && stop.transcript_path !== '') transcriptPath = stop.transcript_path
+    const tasks = stop.background_tasks
     if (Array.isArray(tasks)) {
       backgroundTasks = tasks.length
+      backgroundLabels = tasks.slice(0, 10).map(t => {
+        const task = t as { type?: unknown; description?: unknown }
+        const text = typeof task.description === 'string' ? task.description.replace(/\s+/g, ' ').slice(0, 120) : ''
+        return `${typeof task.type === 'string' ? task.type : 'task'}: ${text}`
+      })
       await recount($).catch(err => $.ui.log(`context-handoff: ${shortReason(err)}`, { to: 'debug' }))
     }
     return result
@@ -273,6 +294,7 @@ export const register: Register = on => {
       await $.store.set('lastLang', 'he')
       $.ui.invalidate('ui.render')
     }
+    if (isPerson) cancelIdle()
     if (isTyped) await onPersonTyped($)
     const result = await next(e)
     if (isRequest && !(result as { drop?: unknown }).drop) lastTypedText = text
@@ -296,7 +318,7 @@ export const register: Register = on => {
 
   on('session.compact', async ($, e, next) => {
     const isMain = e.agentId === undefined
-    const isSteer = isMain && e.trigger === 'auto' && settings.enabled && !(e.instructions ?? '').includes('[context-handoff]')
+    const isSteer = isMain && (e.trigger === 'auto' || e.trigger === 'precompute') && settings.enabled && !(e.instructions ?? '').includes('[context-handoff]')
     const result = await next(isSteer ? { ...e, instructions: e.instructions ? `${e.instructions}\n\n${COMPACT_STEER}` : COMPACT_STEER } : e)
     if (isMain && e.trigger !== 'precompute' && !(result as { skip?: unknown }).skip) {
       resetOffers()
@@ -444,7 +466,7 @@ export const register: Register = on => {
         break
       }
       case 'saved':
-        parts = w.saved
+        parts = p.isIdle === true ? w.savedIdle : w.saved
         color = 'success'
         detail = p.entry.isInWorktree === true ? p.entry.path : HANDOFF_REL
         buttons = [
@@ -685,6 +707,9 @@ async function collectFacts($: EngineInterface): Promise<Facts> {
     folders: settingsFolders(merged),
     addedFolders,
     editedFiles: editedFiles(messages),
+    commands: recentCommands(messages),
+    background: backgroundTasks > 0 ? backgroundLabels : [],
+    transcriptPath,
     lastUserText: lastTypedText ?? lastUserText(messages),
     isLastUserTextSeen: lastTypedText !== null,
     previous,
@@ -715,7 +740,7 @@ async function forkOnce($: EngineInterface, prompt: string): Promise<ForkOutcome
   return outcome
 }
 
-async function startHandoff($: EngineInterface, mode: Mode, origin: 'person' | 'refork' = 'person', force = false) {
+async function startHandoff($: EngineInterface, mode: Mode, origin: 'person' | 'refork' | 'idle' = 'person', force = false) {
   if (isBusy()) return
   // Agents and background tasks report to this conversation: a switch now would lose their results.
   if (mode === 'switch' && !force) {
@@ -806,7 +831,7 @@ async function startHandoff($: EngineInterface, mode: Mode, origin: 'person' | '
       $.ui.invalidate('ui.render')
       return
     }
-    await afterWritten($, entry, mode, isStale)
+    await afterWritten($, entry, mode, isStale, origin === 'idle')
   } catch (err) {
     if (isStale()) return
     $.ui.log(`context-handoff: ${shortReason(err)}`, { to: 'debug' })
@@ -827,12 +852,12 @@ async function saveFile($: EngineInterface, path: string, root: string, text: st
   await $.fs.write(path, text)
 }
 
-async function afterWritten($: EngineInterface, entry: Keyed, mode: Mode, isStale: () => boolean) {
+async function afterWritten($: EngineInterface, entry: Keyed, mode: Mode, isStale: () => boolean, isIdle = false) {
   await $.store.set(entry.key, stripKey(entry))
   if (isStale()) return
   if (mode === 'write') {
     ownWritten = entry
-    phase = { kind: 'saved', entry }
+    phase = { kind: 'saved', entry, ...(isIdle ? { isIdle: true } : {}) }
     $.ui.invalidate('ui.render')
     return
   }
@@ -867,6 +892,45 @@ function standDown($: EngineInterface, entry: Keyed, cur: Pending | undefined) {
   clearWatch = null
   phase = cur !== undefined && cur.createdAt === entry.createdAt && cur.state === 'consumed' ? { kind: 'notice', parts: 'taken' } : { kind: 'idle' }
   $.ui.invalidate('ui.render')
+}
+
+// ---------------------------------------------------------------- idle checkpoint
+
+function cancelIdle() {
+  idleTimer?.cancel()
+  idleTimer = null
+}
+
+function scheduleIdle($: EngineInterface) {
+  cancelIdle()
+  if (!settings.enabled) return
+  idleTimer = $.clock.after(IDLE_CHECKPOINT_MS, () => {
+    idleTimer = null
+    void idleCheckpoint($).catch(err => $.ui.log(`context-handoff: ${shortReason(err)}`, { to: 'debug' }))
+  })
+}
+
+/** Claude Code will compact this conversation while it sits idle: an interactive terminal, idle compaction on, and enough tokens. */
+async function willCompactWhenIdle($: EngineInterface, tokens: number): Promise<boolean> {
+  const surfaces: readonly string[] = await $.session.surfaces()
+  if (!surfaces.includes('terminal')) return false
+  const merged = (await $.settings.read().catch(() => undefined)) as { idleCompaction?: unknown; autoCompactEnabled?: unknown } | undefined
+  if (merged?.idleCompaction === false || merged?.autoCompactEnabled === false) return false
+  const off = (await $.env.get('DISABLE_AUTO_COMPACT')) ?? ''
+  if (off !== '' && off !== '0' && off.toLowerCase() !== 'false') return false
+  const min = Number(await $.env.get('CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS'))
+  return tokens >= (Number.isFinite(min) && min > 0 ? Math.max(100_000, min) : IDLE_COMPACT_MIN_TOKENS)
+}
+
+/** Idle long enough that Claude Code is about to compact: save a handoff first, past the offer line only. */
+async function idleCheckpoint($: EngineInterface) {
+  if (!settings.enabled || isWorking || isBusy() || ownWritten !== null || lastTokens === undefined || compactAt === 0) return
+  if (phase.kind !== 'idle' && phase.kind !== 'offer') return
+  const tokens = lastTokens
+  if (tokens < offerLine(settings.at, compactAt)) return
+  if (!(await willCompactWhenIdle($, tokens))) return
+  if ((await inFlight($)) > 0 || isWorking || isBusy()) return
+  await startHandoff($, 'write', 'idle')
 }
 
 // ---------------------------------------------------------------- background work
@@ -1055,7 +1119,9 @@ async function keepForLater($: EngineInterface, isOutdated = true) {
 function onCleared($: EngineInterface) {
   // The new conversation counts its own background work from its first Stop.
   backgroundTasks = 0
+  backgroundLabels = []
   inFlightNow = 0
+  cancelIdle()
   const entry = (phase.kind === 'switching' || phase.kind === 'clear-needed') ? switchEntry : null
   // A /clear of this mod's that landed after the person chose to stay: the conversation is gone anyway, so pick up, carefully.
   const withdrawn = entry === null ? withdrawnClear : null
@@ -1102,6 +1168,7 @@ function onCleared($: EngineInterface) {
 
 /** /resume or /branch: another conversation now; nothing of this one carries over. */
 function onResumedElsewhere($: EngineInterface) {
+  cancelIdle()
   runSeq += 1
   reforkCount = 0
   isReforkPending = false
